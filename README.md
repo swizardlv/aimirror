@@ -137,10 +137,10 @@ snapshot_download(repo_id="meta-llama/Llama-2-7b-hf", local_dir="./models")
 
 ```bash
 # 使用 GitHub Container Registry
-docker pull ghcr.io/your-username/aimirror:main
+docker pull ghcr.io/livehl/aimirror:latest
 
 # 运行
-docker run -d -p 8081:8081 -v $(pwd)/cache:/data/fast_proxy/cache ghcr.io/your-username/aimirror:main
+docker run -d -p 8081:8081 -v $(pwd)/cache:/data/fast_proxy/cache ghcr.io/livehl/aimirror:latest
 ```
 
 ## ⚙️ 配置示例
