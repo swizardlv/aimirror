@@ -202,6 +202,56 @@ rules:
 | `rules[].path_rewrite` | 路径重写规则（如 HuggingFace blob→resolve） |
 | `rules[].cache_key_source` | `original` 使用原始URL作为缓存key（解决临时签名问题） |
 
+## 🧪 测试
+
+### 运行测试
+
+```bash
+# 运行简单测试（无需 pytest）
+python test_simple.py
+
+# 运行完整测试套件（需要 pytest）
+pytest test_proxy.py -v
+```
+
+### 手动验证
+
+**测试 PyPI 代理**
+```bash
+curl -o /dev/null "http://localhost:8081/packages/fb/d7/71b982339efc4fff3c622c6fefecddfd3e0b35b60c5f822872d5b806bb71/torch-1.0.0-cp27-cp27m-manylinux1_x86_64.whl" \
+  -w "HTTP: %{http_code}, Size: %{size_download}, Time: %{time_total}s\n"
+```
+
+**测试 HuggingFace 代理**
+```bash
+export HF_ENDPOINT=http://localhost:8081
+huggingface-cli download TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf
+```
+
+**测试 Docker Registry 代理**
+```bash
+# 获取 token
+TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/nginx:pull" \
+  | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+
+# 下载 blob
+curl -o /dev/null "http://localhost:8081/v2/library/nginx/blobs/sha256:abc123" \
+  -H "Authorization: Bearer $TOKEN" \
+  -w "HTTP: %{http_code}, Size: %{size_download}, Time: %{time_total}s\n"
+```
+
+**验证缓存命中**
+```bash
+# 第一次下载（并行下载）
+time curl -o /tmp/test1.gguf "http://localhost:8081/unsloth/model/resolve/main/file.gguf"
+
+# 第二次下载（缓存命中，应该快很多）
+time curl -o /tmp/test2.gguf "http://localhost:8081/unsloth/model/resolve/main/file.gguf"
+
+# 查看缓存统计
+curl http://localhost:8081/stats | jq
+```
+
 ## 📄 License
 
 MIT
