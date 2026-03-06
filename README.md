@@ -6,6 +6,8 @@
 [![PyPI](https://img.shields.io/badge/PyPI-aimirror-blue)](https://pypi.org/project/aimirror/)
 
 > AI 时代的下载镜像加速器 —— 被慢速网络逼疯的工程师的自救工具
+> 
+> **一个服务 = PyPI + Docker Hub + CRAN + HuggingFace 全加速，还能任意扩展更多源**
 
 ## 💡 项目背景
 
@@ -25,6 +27,41 @@
 - **🎯 动态路由** —— 小文件直接代理，大文件自动并行
 - **🔗 多源支持** —— Docker Hub、PyPI、CRAN、HuggingFace 开箱即用
 - **🔌 任意扩展** —— 只要是 HTTP 下载，配置一条规则即可几十倍加速
+
+## 🔥 性能实测
+
+### PyPI 包安装加速对比
+
+使用 `uv pip install` 安装 148 个依赖包（含 torch、transformers 等大包）：
+
+| 模式 | 解析依赖 | 准备包 | 总耗时 | 加速比 |
+|------|---------|--------|--------|--------|
+| ❌ 仅代理 (900KB/s) | 17m 04s | 14m 20s | **~31 分钟** | 1x |
+| ✅ aimirror (170MB/s) | 34.78s | 45.81s | **~80 秒** | **23x** |
+
+> 💡 **实测环境**: 公司内网代理，带宽瓶颈明显。使用 aimirror 后从 900KB/s 飙升至 170MB/s，**提速近 200 倍**！
+
+### 缓存效果
+
+| 场景 | 耗时 | 说明 |
+|------|------|------|
+| 首次下载 | 80s | 并行下载 + 写入缓存 |
+| 缓存命中 | <1s | 本地直接返回，秒开 |
+
+### 多源同时加速
+
+**一个 aimirror 服务，同时加速多种包管理器：**
+
+| 包管理器 | 配置方式 | 加速效果 |
+|---------|---------|---------|
+| **pip/uv** | `export HTTPS_PROXY=http://localhost:8081` 或 `pip install -i http://localhost:8081/simple` | PyPI 包 23x 加速 |
+| **docker** | `/etc/docker/daemon.json` 中设置 `registry-mirrors` | 镜像拉取并行分片 |
+| **R CRAN** | `options(repos = c(CRAN = "http://localhost:8081"))` | R 包下载加速 |
+| **huggingface-cli** | `export HF_ENDPOINT=http://localhost:8081` | 模型文件秒下 |
+| **conda** | `.condarc` 中配置 `channels` | 同理可扩展 |
+| **npm/maven** | 配置 registry 指向 aimirror | 任意 HTTP 源均可 |
+
+> 🔌 **扩展能力**: 只要是 HTTP 下载，在 `config.yaml` 中添加一条规则即可接入加速，无需启动多个服务。
 
 ## 🏗️ 架构
 
