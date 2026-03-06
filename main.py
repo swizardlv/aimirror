@@ -256,14 +256,15 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             # 缓存还没准备好，返回 302 让客户端再试一次
             logging.warning(f"Download done but cache not ready: {cache_key}")
         
-        # 还在下载中，返回 302 让客户端稍后重试
+        # 还在下载中，返回 202 让客户端稍后重试
         elapsed = asyncio.get_event_loop().time() - start_time
-        logging.info(f"File downloading, returning 302: {cache_key} (elapsed: {elapsed:.1f}s)")
+        # 如果已经等了很久，给更长的重试时间
+        retry_after = "10" if elapsed > 30 else "5" if elapsed > 10 else "2"
+        logging.info(f"File downloading, returning 202: {cache_key} (elapsed: {elapsed:.1f}s, retry: {retry_after}s)")
         return Response(
-            status_code=302,
+            status_code=202,
             headers={
-                "Location": str(request.url),
-                "Retry-After": "3",
+                "Retry-After": retry_after,
                 "Cache-Control": "no-cache, no-store, must-revalidate"
             }
         )
@@ -304,34 +305,46 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             start_time = asyncio.get_event_loop().time()
             active_downloads[cache_key] = (temp_file, download_task, start_time)
             
-            # 每秒检测一次，下载完成立即返回，最多等待15秒
+            # 检查是否高负载（信号量被锁定表示并发已满）
+            if download_semaphore.locked():
+                # 高负载：立即返回 202 + 10s 延时，快速处理连接队列
+                logging.info(f"High load, returning 202 with 10s retry: {cache_key}")
+                return Response(
+                    status_code=202,
+                    headers={
+                        "Retry-After": "10",
+                        "Cache-Control": "no-cache, no-store, must-revalidate"
+                    }
+                )
+            
+            # 非高负载：每0.5秒检测一次，下载完成立即返回，最多等待10秒
             try:
-                for _ in range(15):
-                    await asyncio.sleep(1)
+                for _ in range(20):  # 20 * 0.5 = 10秒
+                    await asyncio.sleep(0.5)
                     
                     # 检查下载是否完成
                     if download_task.done():
                         exc = download_task.exception()
                         if exc:
                             raise HTTPException(502, f"Download failed: {str(exc)}")
-                        # 等待缓存写入
+                        # 等待缓存写入（最多5秒）
                         for _ in range(10):
                             cached = cache.get(cache_key, content_type)
                             if cached:
+                                logging.info(f"Download ready, returning 200: {cache_key}")
                                 return StreamingResponse(
                                     _file_iterator(cached),
                                     media_type=content_type,
                                     headers={"Content-Length": str(os.path.getsize(cached))}
                                 )
                             await asyncio.sleep(0.5)
-                        break  # 缓存还没好，返回302
+                        break  # 缓存还没好，返回202
                 
-                logging.info(f"Download not ready, returning 302: {cache_key}")
+                logging.info(f"Download not ready, returning 202: {cache_key}")
                 return Response(
-                    status_code=302,
+                    status_code=202,
                     headers={
-                        "Location": str(request.url),
-                        "Retry-After": "3",
+                        "Retry-After": "2",
                         "Cache-Control": "no-cache, no-store, must-revalidate"
                     }
                 )
@@ -413,7 +426,16 @@ def main():
         "main:app",
         host=config['server']['host'],
         port=config['server']['port'],
-        log_level="info"
+        log_level="info",
+        # 并发优化
+        workers=1,  # 单进程多线程模式（适合IO密集型）
+        loop="uvloop",  # 使用 uvloop 提高性能
+        http="httptools",  # 使用 httptools 提高HTTP解析性能
+        # 连接优化
+        backlog=2048,  # TCP连接队列大小
+        limit_concurrency=500,  # 最大并发连接数
+        limit_max_requests=10000,  # 每个连接最大请求数
+        timeout_keep_alive=30,  # 保持连接超时时间
     )
 
 if __name__ == "__main__":
