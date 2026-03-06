@@ -452,8 +452,12 @@ async def proxy_handler(request: Request, full_path: str):
         return await _proxy_request(request, target_url, rule)
     
     if rule.strategy == 'parallel':
-        # 仅 GET/HEAD 支持并行下载
-        if request.method not in ['GET', 'HEAD']:
+        # HEAD 请求只做转发，不进行并行下载
+        if request.method == 'HEAD':
+            logging.info("HEAD request, using proxy strategy")
+            return await _proxy_request(request, target_url, rule)
+        # 仅 GET 支持并行下载
+        if request.method != 'GET':
             logging.info(f"Method {request.method} not supported for parallel, using proxy")
             return await _proxy_request(request, target_url, rule)
         logging.info("Using parallel download strategy")
