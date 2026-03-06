@@ -19,13 +19,14 @@ class Chunk:
 class ParallelDownloader:
     def __init__(self, url: str, filepath: str, concurrency: int = 4, 
                  chunk_size: int = 5*1024*1024, proxy: Optional[str] = None,
-                 headers: Optional[dict] = None):
+                 headers: Optional[dict] = None, stream_mode: bool = False):
         self.url = url
         self.filepath = filepath
         self.concurrency = concurrency
         self.chunk_size = chunk_size
         self.proxy = proxy
         self.headers = headers or {}
+        self.stream_mode = stream_mode  # 流式模式：边下载边写入文件
         self.total_size = 0
         self.chunks: List[Chunk] = []
         
@@ -134,3 +135,84 @@ class ParallelDownloader:
             logging.info(f"Download completed: {self.filepath}")
         
         return self.filepath
+    
+    async def download_with_streaming(self, cache_key: str, temp_file: str, cache, content_type: str):
+        """流式下载 - 边下载边写入文件，支持多个客户端同时读取"""
+        import aiofiles
+        import asyncio
+        
+        try:
+            logging.info(f"Starting streaming download: {self.url}")
+            
+            async with aiohttp.ClientSession() as session:
+                # 1. 获取文件大小
+                self.total_size = await self._get_file_size(session)
+                logging.info(f"File size: {self.total_size / 1024 / 1024:.1f}MB")
+                
+                # 2. 预分配文件空间
+                async with aiofiles.open(temp_file, 'wb') as f:
+                    await f.truncate(self.total_size)
+                
+                # 3. 分割任务
+                self.chunks = self._split_chunks(self.total_size)
+                logging.info(f"Split into {len(self.chunks)} chunks")
+                
+                # 4. 并发下载并实时写入
+                sem = asyncio.Semaphore(self.concurrency)
+                
+                async def download_and_write(chunk: Chunk):
+                    """下载单个分片并立即写入文件"""
+                    async with sem:
+                        headers = dict(self.headers)
+                        headers['Range'] = f'bytes={chunk.start}-{chunk.end}'
+                        
+                        for attempt in range(3):
+                            try:
+                                async with session.get(self.url, headers=headers, proxy=self.proxy) as resp:
+                                    if resp.status == 206:
+                                        data = await resp.read()
+                                        # 立即写入文件
+                                        async with aiofiles.open(temp_file, 'r+b') as f:
+                                            await f.seek(chunk.start)
+                                            await f.write(data)
+                                        return
+                                    elif resp.status == 200 and chunk.start == 0:
+                                        data = await resp.read()
+                                        async with aiofiles.open(temp_file, 'r+b') as f:
+                                            await f.write(data)
+                                        return
+                                    else:
+                                        raise RuntimeError(f"Chunk download failed: {resp.status}")
+                            except Exception as e:
+                                if attempt < 2:
+                                    await asyncio.sleep(2 ** attempt)
+                                else:
+                                    raise
+                
+                # 启动所有下载任务
+                tasks = [download_and_write(chunk) for chunk in self.chunks]
+                
+                # 等待所有下载完成
+                completed = 0
+                for task in asyncio.as_completed(tasks):
+                    await task
+                    completed += 1
+                    if completed % max(1, len(self.chunks) // 10) == 0 or completed == len(self.chunks):
+                        progress = completed / len(self.chunks) * 100
+                        logging.info(f"Download progress: {progress:.1f}% ({completed}/{len(self.chunks)} chunks)")
+                
+                logging.info(f"Streaming download completed: {temp_file}")
+                
+                # 5. 存入缓存
+                cache.put(cache_key, temp_file, content_type)
+                
+        except Exception as e:
+            logging.error(f"Streaming download failed: {e}")
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+            raise
+        finally:
+            # 清理 active_downloads
+            import main
+            if cache_key in main.active_downloads:
+                del main.active_downloads[cache_key]

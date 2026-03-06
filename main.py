@@ -37,6 +37,7 @@ router: Router = None
 cache: CacheManager = None
 http_client: httpx.AsyncClient = None
 download_semaphore: asyncio.Semaphore = None  # 全局下载并发控制
+active_downloads: dict = {}  # 正在下载的文件 {cache_key: asyncio.Event}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -155,84 +156,161 @@ async def _file_iterator(filepath: str, chunk_size: int = 8192):
         while chunk := f.read(chunk_size):
             yield chunk
 
+async def _streaming_file_iterator(filepath: str, download_task: asyncio.Task, total_size: int, chunk_size: int = 65536):
+    """流式文件迭代器 - 边下载边返回数据，确保数据已下载才返回"""
+    last_size = 0
+    max_wait = 600  # 最多等待 600 秒
+    start_time = asyncio.get_event_loop().time()
+    
+    with open(filepath, 'rb') as f:
+        while last_size < total_size:
+            # 检查是否超时
+            if asyncio.get_event_loop().time() - start_time > max_wait:
+                raise TimeoutError(f"Download timeout after {max_wait}s")
+            
+            # 获取当前文件大小
+            f.seek(0, 2)
+            current_size = f.tell()
+            
+            # 如果当前位置的数据还没准备好，等待
+            if current_size <= last_size:
+                # 检查下载任务是否失败
+                if download_task.done():
+                    exc = download_task.exception()
+                    if exc:
+                        raise exc
+                    # 任务完成但文件大小不够，可能出错了
+                    if current_size < total_size:
+                        raise RuntimeError("Download incomplete")
+                    break
+                
+                # 数据还没准备好，等待一小段时间
+                await asyncio.sleep(0.05)
+                continue
+            
+            # 读取已准备好的数据
+            f.seek(last_size)
+            bytes_to_read = min(current_size - last_size, chunk_size)
+            chunk = f.read(bytes_to_read)
+            
+            if chunk:
+                yield chunk
+                last_size += len(chunk)
+        
+        # 下载完成，确保读取所有剩余数据
+        f.seek(last_size)
+        while chunk := f.read(chunk_size):
+            yield chunk
+
 async def _parallel_download(request: Request, target_url: str, rule) -> Response:
-    """并行下载 + 缓存策略（带全局并发控制）"""
+    """并行下载 + 缓存策略（带全局并发控制和流式返回）"""
     logging.info(f"Entering _parallel_download for: {target_url}")
     
-    # 使用全局信号量控制总并发数
+    # 1. 先 HEAD 获取文件大小和内容类型，跟随重定向
+    headers = {}
+    auth_header = request.headers.get('authorization')
+    if auth_header:
+        headers['Authorization'] = auth_header
+    
+    head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
+    final_url = str(head_resp.url)
+    content_length = int(head_resp.headers.get('content-length', 0))
+    content_type = head_resp.headers.get('content-type', '')
+    
+    # 检查文件大小是否符合规则
+    if content_length < rule.min_size:
+        return await _proxy_request(request, target_url, rule)
+    
+    # 2. 确定缓存 key
+    cache_key_source = getattr(rule, 'cache_key_source', 'final')
+    cache_key = target_url if cache_key_source == 'original' else final_url
+    
+    # 3. 检查缓存
+    cached = cache.get(cache_key, content_type)
+    if cached:
+        return StreamingResponse(
+            _file_iterator(cached),
+            media_type=content_type,
+            headers={"Content-Length": str(os.path.getsize(cached))}
+        )
+    
+    # 4. 检查是否正在下载中
+    if cache_key in active_downloads:
+        temp_file, download_task, start_time = active_downloads[cache_key]
+        
+        # 检查下载是否已完成
+        if download_task.done():
+            exc = download_task.exception()
+            if exc:
+                raise HTTPException(502, f"Download failed: {str(exc)}")
+            # 下载完成，从缓存返回
+            cached = cache.get(cache_key, content_type)
+            if cached:
+                return StreamingResponse(
+                    _file_iterator(cached),
+                    media_type=content_type,
+                    headers={"Content-Length": str(os.path.getsize(cached))}
+                )
+        
+        # 还在下载中，返回 302 让客户端稍后重试
+        elapsed = asyncio.get_event_loop().time() - start_time
+        logging.info(f"File downloading, returning 302: {cache_key} (elapsed: {elapsed:.1f}s)")
+        return Response(
+            status_code=302,
+            headers={"Location": str(request.url), "Retry-After": "3"}
+        )
+    
+    # 5. 使用全局信号量控制并发，并开始下载
     async with download_semaphore:
-        # 1. 先 HEAD 获取文件大小和内容类型，跟随重定向
-        # 带上客户端的 Authorization header（用于 Docker Registry 认证）
-        headers = {}
-        auth_header = request.headers.get('authorization')
-        if auth_header:
-            headers['Authorization'] = auth_header
-        
-        head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
-        # 获取最终 URL（如果有重定向）
-        final_url = str(head_resp.url)
-        logging.info(f"Final URL after redirect: {final_url}")
-        content_length = int(head_resp.headers.get('content-length', 0))
-        content_type = head_resp.headers.get('content-type', '')
-        logging.info(f"HEAD response: content_length={content_length}, content_type={content_type}")
-        
-        # 检查文件大小是否符合规则
-        if content_length < rule.min_size:
-            logging.info(f"File size {content_length} < min_size {rule.min_size}, fallback to proxy")
-            return await _proxy_request(request, target_url, rule)
-        
-        # 2. 检查缓存
-        # 根据规则配置决定使用哪个 URL 作为缓存 key
-        # target_url 是原始请求 URL，final_url 是重定向后的 URL（可能包含临时签名）
-        cache_key_source = getattr(rule, 'cache_key_source', 'final')
-        if cache_key_source == 'original':
-            cache_key = target_url
-            logging.info(f"Using original URL as cache key: {cache_key}")
-        else:
-            cache_key = final_url
-        
+        # 再次检查缓存（可能其他线程已完成）
         cached = cache.get(cache_key, content_type)
         if cached:
-            logging.info(f"Cache HIT: {cache_key}")
             return StreamingResponse(
                 _file_iterator(cached),
                 media_type=content_type,
                 headers={"Content-Length": str(os.path.getsize(cached))}
             )
         
-        # 3. 并行下载（使用最终 URL）
-        logging.info(f"Cache MISS, parallel download: {final_url} (size: {content_length} bytes)")
-        # 使用 URL 的 hash 作为文件名，避免 URL 参数导致文件名过长
+        # 准备下载
         url_hash = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
         temp_file = os.path.join(config['cache']['dir'], f"tmp_{url_hash}")
         
-        # 如果有 Authorization header，需要传递给下载器
-        downloader = ParallelDownloader(
-            url=final_url,
-            filepath=temp_file,
-            concurrency=rule.concurrency,
-            chunk_size=rule.chunk_size,
-            proxy=config['server'].get('upstream_proxy'),
-            headers=headers if auth_header else None
-        )
-        
         try:
-            filepath = await downloader.download()
+            # 创建下载器，启用流式模式
+            downloader = ParallelDownloader(
+                url=final_url,
+                filepath=temp_file,
+                concurrency=rule.concurrency,
+                chunk_size=rule.chunk_size,
+                proxy=config['server'].get('upstream_proxy'),
+                headers=headers if auth_header else None,
+                stream_mode=True  # 启用流式模式
+            )
+            
+            # 启动后台下载任务
+            download_task = asyncio.create_task(
+                downloader.download_with_streaming(cache_key, temp_file, cache, content_type)
+            )
+            
+            # 标记为正在下载（存储文件路径、任务和开始时间）
+            start_time = asyncio.get_event_loop().time()
+            active_downloads[cache_key] = (temp_file, download_task, start_time)
+            
+            # 先睡 3 秒，让下载有点进度，再返回 302
+            await asyncio.sleep(3)
+            logging.info(f"Download started, returning 302: {cache_key}")
+            return Response(
+                status_code=302,
+                headers={"Location": str(request.url), "Retry-After": "3"}
+            )
+            
         except Exception as e:
             logging.error(f"Download failed: {e}")
+            if cache_key in active_downloads:
+                del active_downloads[cache_key]
             if os.path.exists(temp_file):
                 os.remove(temp_file)
             raise HTTPException(502, f"Download error: {str(e)}")
-        
-        # 4. 存入缓存（使用 cache_key）
-        cache.put(cache_key, filepath, content_type)
-        
-        # 5. 流式返回内容
-        return StreamingResponse(
-            _file_iterator(filepath),
-            media_type=content_type,
-            headers={"Content-Length": str(os.path.getsize(filepath))}
-        )
 
 @app.get("/health")
 async def health():

@@ -407,6 +407,10 @@ def run_all_tests():
         if not test_end_to_end():
             all_passed = False
         
+        # 并发下载和 302 重定向测试
+        if not test_concurrent_download():
+            all_passed = False
+        
         print("\n" + "=" * 50)
         if all_passed:
             print("所有测试通过！")
@@ -423,6 +427,112 @@ def run_all_tests():
         import traceback
         traceback.print_exc()
         return 1
+
+
+def test_concurrent_download():
+    """测试并发下载和 302 重定向机制"""
+    print("=" * 50)
+    print("测试并发下载和 302 重定向")
+    print("=" * 50)
+    
+    import subprocess
+    import time
+    import signal
+    import threading
+    
+    # 清除缓存
+    print("\n[1/4] 清除缓存...")
+    subprocess.run(['rm', '-rf', '/data/fast_proxy/cache/*'], capture_output=True)
+    print("✓ 缓存已清除")
+    
+    # 启动服务
+    print("\n[2/4] 启动 fast_proxy 服务...")
+    proc = subprocess.Popen(
+        ['python3', 'main.py'],
+        cwd='/data/fast_proxy',
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid
+    )
+    
+    # 等待服务启动
+    print("  等待服务启动...")
+    max_retries = 10
+    for i in range(max_retries):
+        time.sleep(2)
+        try:
+            result = subprocess.run(
+                ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', 'http://localhost:8081/health'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.stdout.strip() == '200':
+                print("✓ 服务启动成功")
+                break
+        except:
+            pass
+        print(f"  重试 {i+1}/{max_retries}...")
+    else:
+        print(f"✗ 服务启动失败")
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        return False
+    
+    # 测试 302 重定向和并发下载
+    print("\n[3/4] 测试 302 重定向和并发下载...")
+    test_url = 'http://localhost:8081/packages/fb/d7/71b982339efc4fff3c622c6fefecddfd3e0b35b60c5f822872d5b806bb71/torch-1.0.0-cp27-cp27m-manylinux1_x86_64.whl'
+    
+    results = []
+    
+    def download_with_retry(name, max_redirects=10):
+        """模拟客户端跟随 302 重定向下载"""
+        url = test_url
+        redirects = 0
+        
+        while redirects < max_redirects:
+            cmd = ['curl', '-s', '-L', '-o', '/dev/null', '-w', 
+                   'HTTP:%{http_code},Redirect:%{num_redirects},Size:%{size_download},Time:%{time_total}',
+                   '--max-time', '60', url]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            output = result.stdout.strip()
+            results.append((name, output))
+            print(f"  {name}: {output}")
+            return
+    
+    # 同时启动 3 个客户端下载同一个文件
+    threads = []
+    for i in range(3):
+        t = threading.Thread(target=download_with_retry, args=(f'客户端{i+1}',))
+        threads.append(t)
+    
+    start_time = time.time()
+    for t in threads:
+        t.start()
+        time.sleep(0.5)  # 稍微错开启动时间
+    
+    for t in threads:
+        t.join()
+    
+    elapsed = time.time() - start_time
+    print(f"\n  总耗时: {elapsed:.2f}秒")
+    
+    # 验证结果
+    success_count = sum(1 for _, output in results if 'HTTP:200' in output)
+    print(f"  成功下载: {success_count}/3")
+    
+    # 4. 关闭服务
+    print("\n[4/4] 关闭服务...")
+    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    proc.wait()
+    print("✓ 服务已关闭")
+    
+    if success_count == 3:
+        print("✓ 并发下载和 302 重定向测试通过！")
+        return True
+    else:
+        print("✗ 并发下载测试失败")
+        return False
 
 
 if __name__ == '__main__':
