@@ -163,8 +163,14 @@ aimirror
 # 或使用 GitHub Container Registry
 docker pull ghcr.io/livehl/aimirror:latest
 
-# 运行
+# 运行（基础版）
 docker run -d -p 8081:8081 -v $(pwd)/cache:/data/fast_proxy/cache ghcr.io/livehl/aimirror:latest
+
+# 运行（带自定义配置）
+docker run -d -p 8081:8081 \
+  -v $(pwd)/config.yaml:/app/config.yaml \
+  -v $(pwd)/cache:/data/fast_proxy/cache \
+  ghcr.io/livehl/aimirror:latest
 ```
 
 ## ⚙️ 配置示例
