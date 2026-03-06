@@ -20,8 +20,8 @@ rules:
     concurrency: 20
     chunk_size: 10485760     # 10MB per chunk
     
-  - name: pip-wheel
-    pattern: "/packages/.+\\.whl$"
+  - name: pip-packages
+    pattern: "/packages/.+\\.(whl|tar\\.gz|zip)$"
     upstream: "https://pypi.org"
     strategy: parallel
     min_size: 1024000       # 1M
