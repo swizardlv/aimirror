@@ -27,6 +27,11 @@
 - **🎯 动态路由** —— 小文件直接代理，大文件自动并行
 - **🔗 多源支持** —— Docker Hub、PyPI、CRAN、HuggingFace 开箱即用
 - **🔌 任意扩展** —— 只要是 HTTP 下载，配置一条规则即可几十倍加速
+- **📝 内容改写** —— 自动改写 HTML/JSON 响应中的链接，无缝代理
+- **🎛️ 特殊处理** —— 支持自定义 Handler 处理复杂场景（如 Docker Registry）
+- **🚦 并发控制** —— 全局下载并发限制，防止资源耗尽
+- **🔄 路径重写** —— 灵活的路径替换规则，适配各种 API 差异
+- **🔑 缓存优化** —— 支持原始 URL 作为缓存 key，解决临时签名问题
 
 ## 🔥 性能实测
 
@@ -71,43 +76,55 @@ flowchart LR
         PIP[pip install]
         DOCKER[docker pull]
         HF[huggingface-cli]
+        R[R install.packages]
     end
 
     subgraph aimirror["aimirror 服务"]
         ROUTER[路由匹配器<br/>router.py]
-        PROXY[直接代理<br/>小文件]
+        HANDLER[特殊处理器<br/>handlers/]
+        PROXY[直接代理<br/>proxy]
         DOWNLOADER[并行下载器<br/>downloader.py]
         CACHE[缓存管理器<br/>cache.py]
+        REWRITE[内容改写<br/>content_rewrite]
     end
 
     subgraph UpstreamProxy["上游代理 (可选)"]
-        COMPANY_PROXY[公司代理<br/>http://proxy.company.com:8080]
+        COMPANY_PROXY[公司代理]
     end
 
     subgraph Upstream["上游服务"]
         PYPI[PyPI]
         DOCKER_HUB[Docker Hub]
         HF_HUB[HuggingFace]
+        CRAN[CRAN]
     end
 
     PIP --> ROUTER
     DOCKER --> ROUTER
     HF --> ROUTER
+    R --> ROUTER
 
-    ROUTER -->|小文件| PROXY
-    ROUTER -->|大文件| DOWNLOADER
+    ROUTER -->|匹配 handler| HANDLER
+    ROUTER -->|小文件/代理策略| PROXY
+    ROUTER -->|大文件/并行策略| DOWNLOADER
 
-    PROXY --> UpstreamProxy
+    HANDLER --> PROXY
+    PROXY -->|需要改写| REWRITE
+    REWRITE --> Client
+    PROXY -->|直接返回| Client
+    
     DOWNLOADER --> CACHE
-    CACHE -->|未命中| UpstreamProxy
     CACHE -->|命中| Client
+    CACHE -->|未命中| UpstreamProxy
+    PROXY --> UpstreamProxy
 
-    UpstreamProxy -->|可选| Upstream
-    UpstreamProxy -.->|直连| Upstream
+    UpstreamProxy -.->|可选| Upstream
+    UpstreamProxy -->|直连| Upstream
 
     DOCKER_HUB -->|返回文件| CACHE
     PYPI -->|返回文件| CACHE
     HF_HUB -->|返回文件| CACHE
+    CRAN -->|返回文件| CACHE
 ```
 
 ## 🚀 快速开始
@@ -144,19 +161,41 @@ curl http://localhost:8081/health
 
 ## 🔧 客户端配置
 
-**pip**
+### pip / uv
+
 ```bash
+# 临时使用（单次安装）
 pip install torch --index-url http://localhost:8081/simple --trusted-host localhost:8081
+
+# 全局配置（推荐）
+pip config set global.index-url http://localhost:8081/simple
+pip config set global.trusted-host localhost:8081
+
+# 使用 uv（速度更快）
+uv pip install torch --index-url http://localhost:8081/simple
+
+# 或使用环境变量
+export HTTPS_PROXY=http://localhost:8081
+pip install torch
 ```
 
-**Docker**
-```json
+### Docker
+
+```bash
+# 配置 daemon.json
+sudo tee /etc/docker/daemon.json <<EOF
 {
   "registry-mirrors": ["http://localhost:8081"]
 }
+EOF
+sudo systemctl restart docker
+
+# 或临时拉取
+docker pull --registry-mirror=http://localhost:8081 nginx
 ```
 
-**HuggingFace (huggingface-cli)**
+### HuggingFace (huggingface-cli)
+
 ```bash
 # 设置环境变量
 export HF_ENDPOINT=http://localhost:8081
@@ -182,100 +221,338 @@ hf_hub_download(repo_id="TheBloke/Llama-2-7B-GGUF", filename="llama-2-7b.Q4_K_M.
 snapshot_download(repo_id="meta-llama/Llama-2-7b-hf", local_dir="./models")
 ```
 
+### R (CRAN)
+
+```r
+# 在 R 控制台中设置
+options(repos = c(CRAN = "http://localhost:8081"))
+
+# 或在 .Rprofile 中永久配置
+cat('options(repos = c(CRAN = "http://localhost:8081"))\n', file = "~/.Rprofile")
+```
+
+### Conda
+
+```bash
+# 修改 .condarc
+cat >> ~/.condarc <<EOF
+channels:
+  - http://localhost:8081/conda-forge
+  - http://localhost:8081/bioconda
+EOF
+```
+
+### npm / yarn
+
+```bash
+# 临时使用
+npm install --registry http://localhost:8081/registry/npm
+
+# 全局配置
+npm config set registry http://localhost:8081/registry/npm
+yarn config set registry http://localhost:8081/registry/npm
+```
+
 ## 📖 API
 
-| 路径 | 说明 |
-|------|------|
-| `/*` | 代理到对应上游 (Docker/PyPI/CRAN/HuggingFace) |
-| `/health` | 健康检查 |
-| `/stats` | 缓存统计 |
+### 代理端点
+
+| 路径 | 方法 | 说明 |
+|------|------|------|
+| `/{full_path:path}` | GET/HEAD/POST/PUT/DELETE | 通用代理入口，根据路由规则转发到对应上游 |
+
+### 管理端点
+
+| 路径 | 方法 | 说明 | 响应示例 |
+|------|------|------|----------|
+| `/health` | GET | 健康检查 | `{"status": "ok", "active_downloads": 0, "downloads": []}` |
+| `/stats` | GET | 缓存统计信息 | `{"cache": {"total_size_mb": 1024, "file_count": 100}}` |
+
+### 健康检查响应详情
+
+```bash
+curl http://localhost:8081/health
+```
+
+响应字段说明：
+- `status`: 服务状态，`ok` 表示正常运行
+- `active_downloads`: 当前正在进行的下载任务数
+- `downloads`: 正在下载的文件列表（缓存 key）
+
+### 缓存统计响应详情
+
+```bash
+curl http://localhost:8081/stats | jq
+```
+
+响应包含缓存目录的总大小、文件数量等信息。
 
 ## 🐳 Docker 部署
 
-```bash
-# 使用 PyPI 安装（推荐）
-pip install aimirror
-aimirror
+### 使用 PyPI 安装（推荐）
 
-# 或使用 GitHub Container Registry
+```bash
+# 安装
+pip install aimirror
+
+# 启动
+aimirror
+```
+
+### 使用 GitHub Container Registry
+
+```bash
+# 拉取镜像
 docker pull ghcr.io/livehl/aimirror:latest
 
 # 运行（基础版）
-docker run -d -p 8081:8081 -v $(pwd)/cache:/data/fast_proxy/cache ghcr.io/livehl/aimirror:latest
+docker run -d -p 8081:8081 \
+  -v $(pwd)/cache:/data/fast_proxy/cache \
+  ghcr.io/livehl/aimirror:latest
 
 # 运行（带自定义配置）
 docker run -d -p 8081:8081 \
   -v $(pwd)/config.yaml:/app/config.yaml \
   -v $(pwd)/cache:/data/fast_proxy/cache \
   ghcr.io/livehl/aimirror:latest
+
+# 运行（带上游代理）
+docker run -d -p 8081:8081 \
+  -e HTTP_PROXY=http://proxy.company.com:8080 \
+  -e HTTPS_PROXY=http://proxy.company.com:8080 \
+  -v $(pwd)/cache:/data/fast_proxy/cache \
+  ghcr.io/livehl/aimirror:latest
+```
+
+### Docker Compose 示例
+
+```yaml
+version: '3.8'
+
+services:
+  aimirror:
+    image: ghcr.io/livehl/aimirror:latest
+    container_name: aimirror
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./cache:/data/fast_proxy/cache
+      - ./logs:/data/fast_proxy
+    environment:
+      # 可选：通过环境变量设置代理
+      - HTTP_PROXY=http://proxy.company.com:8080
+      - HTTPS_PROXY=http://proxy.company.com:8080
+    restart: unless-stopped
 ```
 
 ## ⚙️ 配置示例
 
 ```yaml
+# fast_proxy 配置文件
 server:
   host: "0.0.0.0"
   port: 8081
-  upstream_proxy: "http://proxy.company.com:8080"  # 公司代理（可选）
+  upstream_proxy: ""  # 上游代理，默认空表示直连
+  public_host: "127.0.0.1:8081"  # 对外访问地址，用于 HTML 链接改写
+  max_concurrent_downloads: 100  # 全局最大并发下载数，超过则排队
 
 cache:
-  dir: "./cache"
+  dir: "/data/fast_proxy/cache"
   max_size_gb: 100
+  lru_enabled: true
 
 rules:
+  # Docker Registry 代理（/v2/ 和 /v2/auth 在代码中特殊处理）
   - name: docker-blob
     pattern: "/v2/.*/blobs/sha256:[a-f0-9]+"
     upstream: "https://registry-1.docker.io"
     strategy: parallel
-    min_size: 1048576
+    min_size: 1       # all
     concurrency: 20
-    chunk_size: 10485760
-
-  - name: pip-wheel
-    pattern: "/packages/.+\.whl$"
+    chunk_size: 1048576     # 1MB per chunk
+  - name: docker-registry
+    pattern: "/v2/.*"
+    upstream: "https://registry-1.docker.io"
+    strategy: proxy
+    handler: handlers.docker  # 特殊处理模块路径
+    
+  - name: pip-packages
+    pattern: "/packages/.+\\.(whl|tar\\.gz|zip)$"
     upstream: "https://pypi.org"
     strategy: parallel
-    min_size: 1048576
+    min_size: 1       # all
+    concurrency: 20
+    chunk_size: 5242880      # 5MB per chunk
+    
+  - name: r-package
+    pattern: "/src/contrib/.*"
+    upstream: "https://cran.r-project.org"
+    strategy: parallel
+    min_size: 102400       # 100K
     concurrency: 20
     chunk_size: 5242880
 
-  # HuggingFace 文件下载（支持所有模型文件，临时签名 URL 缓存优化）
   - name: huggingface-files
-    pattern: '/.*/(blob|resolve)/main/.+'
+    pattern: '/.*/(blob|resolve)/[^/]+/.+'
     upstream: "https://huggingface.co"
     strategy: parallel
-    min_size: 1048576
+    min_size: 102400       #100k
     concurrency: 20
-    chunk_size: 10485760
-    cache_key_source: original  # 使用原始 URL 作为缓存 key
+    chunk_size: 10485760    # 10MB per chunk
+    cache_key_source: original  # 使用原始 URL 作为缓存 key（避免临时签名影响缓存命中）
     path_rewrite:
-      - search: "/blob/main/"
-        replace: "/resolve/main/"
+      - search: "/blob/"
+        replace: "/resolve/"
+    # HEAD 请求时需要额外保留的响应头（用于元数据获取）
+    head_meta_headers:
+      - "x-repo-commit"
+      - "x-linked-etag"
+      - "x-linked-size"
+      - "etag"
 
-  # 示例：扩展任意 HTTP 下载站点
-  # - name: my-custom-repo
-  #   pattern: '/downloads/.+\.(tar\.gz|zip|bin)$'
-  #   upstream: "https://downloads.example.com"
+  - name: huggingface-api
+    pattern: '/api/models/.*'
+    upstream: "https://huggingface.co"
+    strategy: proxy
+
+  # 示例：其他使用临时签名 URL 的站点
+  # - name: example-signed-url
+  #   pattern: '/signed-download/.*'
+  #   upstream: "https://example.com"
   #   strategy: parallel
-  #   min_size: 10485760    # 10MB 以上启用并行
-  #   concurrency: 16
-  #   chunk_size: 20971520  # 20MB 分片
+  #   min_size: 10485760
+  #   concurrency: 10
+  #   cache_key_source: original  # 使用原始 URL 作为缓存 key
 
   - name: default
     pattern: ".*"
     upstream: "https://pypi.org"
     strategy: proxy
+    content_rewrite:         # 响应内容改写配置
+      content_types:         # 匹配的 Content-Type（HTML 和 JSON）
+        - "text/html"
+        - "application/json"
+        - "application/vnd.pypi.simple"
+      targets:               # 要替换的目标 host 列表
+        - "https://files.pythonhosted.org"
+
+logging:
+  level: "INFO"
+  file: "/data/fast_proxy/fast_proxy.log"
 ```
 
 ### 配置说明
 
-| 字段 | 说明 |
-|------|------|
-| `server.upstream_proxy` | 可选的公司代理，用于连接外网 |
-| `rules[].upstream` | 上游源 base URL |
-| `rules[].strategy` | `proxy` 直接代理 / `parallel` 并行下载 |
-| `rules[].path_rewrite` | 路径重写规则（如 HuggingFace blob→resolve） |
-| `rules[].cache_key_source` | `original` 使用原始URL作为缓存key（解决临时签名问题） |
+#### Server 配置
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `server.host` | 服务监听地址 | `"0.0.0.0"` |
+| `server.port` | 服务监听端口 | `8081` |
+| `server.upstream_proxy` | 上游代理地址，空字符串表示直连 | `""` |
+| `server.public_host` | 对外访问地址，用于 HTML 链接改写 | `"127.0.0.1:8081"` |
+| `server.max_concurrent_downloads` | 全局最大并发下载数，超过则排队 | `100` |
+
+#### Cache 配置
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `cache.dir` | 缓存目录路径 | `"./cache"` |
+| `cache.max_size_gb` | 缓存最大容量（GB） | `100` |
+| `cache.lru_enabled` | 是否启用 LRU 自动淘汰 | `true` |
+
+#### Rules 配置
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `rules[].name` | 规则名称 | `"docker-blob"` |
+| `rules[].pattern` | URL 匹配正则表达式 | `"/v2/.*/blobs/sha256:[a-f0-9]+"` |
+| `rules[].upstream` | 上游源 base URL | `"https://registry-1.docker.io"` |
+| `rules[].strategy` | 下载策略：`proxy` 直接代理 / `parallel` 并行下载 | `"parallel"` |
+| `rules[].min_size` | 最小文件大小（字节），小于此值使用代理 | `1048576` |
+| `rules[].concurrency` | 并行下载线程数 | `20` |
+| `rules[].chunk_size` | 每个分片大小（字节） | `10485760` |
+| `rules[].cache_key_source` | 缓存 key 来源：`original` 使用原始URL，`final` 使用最终URL | `"original"` |
+| `rules[].path_rewrite` | 路径重写规则数组 | `[{search: "/blob/", replace: "/resolve/"}]` |
+| `rules[].content_rewrite` | 响应内容改写配置（用于 HTML/JSON 中的链接替换） | 见 default 规则 |
+| `rules[].handler` | 特殊处理模块路径 | `"handlers.docker"` |
+| `rules[].head_meta_headers` | HEAD 请求时额外保留的响应头列表 | `["etag", "x-repo-commit"]` |
+
+#### Logging 配置
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `logging.level` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR` | `"INFO"` |
+| `logging.file` | 日志文件路径 | `"/tmp/fast_proxy.log"` |
+
+### 高级配置示例
+
+#### 自定义 Handler
+
+创建 `handlers/custom.py`：
+
+```python
+async def exec_path(request, full_path, config, http_client):
+    """
+    自定义请求处理器
+    
+    Args:
+        request: FastAPI Request 对象
+        full_path: 请求路径
+        config: 全局配置字典
+        http_client: httpx.AsyncClient 实例
+    
+    Returns:
+        (handled, response): 
+        - handled: bool，是否已处理
+        - response: 如果 handled=True，返回 Response 对象
+    """
+    if full_path.startswith('/custom/'):
+        # 处理自定义逻辑
+        return True, Response(content="Custom response")
+    
+    # 未处理，继续后续流程
+    return False, None
+```
+
+在 `config.yaml` 中配置：
+
+```yaml
+rules:
+  - name: custom-handler
+    pattern: "/custom/.*"
+    upstream: "https://example.com"
+    strategy: proxy
+    handler: handlers.custom
+```
+
+#### 扩展示例：添加 GitHub Releases 下载加速
+
+```yaml
+rules:
+  - name: github-releases
+    pattern: '/.*/releases/download/.+'
+    upstream: "https://github.com"
+    strategy: parallel
+    min_size: 1048576      # 1MB 以上启用并行
+    concurrency: 16
+    chunk_size: 10485760   # 10MB 分片
+```
+
+#### 扩展示例：添加自定义软件源
+
+```yaml
+rules:
+  - name: my-company-repo
+    pattern: '/artifacts/.+\.(jar|war|zip)$'
+    upstream: "https://artifacts.mycompany.com"
+    strategy: parallel
+    min_size: 10485760     # 10MB 以上启用并行
+    concurrency: 10
+    chunk_size: 20971520   # 20MB 分片
+    cache_key_source: original
+```
 
 ## 🧪 测试
 
