@@ -18,6 +18,8 @@ class Rule:
     cache_key_source: str = 'final'  # 'final' 或 'original'，用于决定缓存 key 来源
     path_rewrite: Optional[list] = None  # 路径重写规则 [{"search": "...", "replace": "..."}]
     content_rewrite: Optional[dict] = None  # 响应内容改写配置 {"content_types": ["text/html"], "targets": ["https://files.pythonhosted.org"]}
+    handler: Optional[str] = None  # 特殊处理模块路径，如 "handlers.docker"
+    head_meta_headers: Optional[list] = None  # HEAD 请求时需要额外保留的响应头列表
     
     def __post_init__(self):
         self._regex = re.compile(self.pattern)

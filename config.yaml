@@ -2,8 +2,8 @@
 server:
   host: "0.0.0.0"
   port: 8081
-  upstream_proxy: "http://192.168.10.3:7890"  # 上游代理，默认空表示直连
-  public_host: "docker.aixhx.cn"  # 对外访问地址，用于 HTML 链接改写
+  upstream_proxy: ""  # 上游代理，默认空表示直连
+  public_host: "127.0.0.1:8081"  # 对外访问地址，用于 HTML 链接改写
   max_concurrent_downloads: 100  # 全局最大并发下载数，超过则排队
 
 cache:
@@ -19,11 +19,12 @@ rules:
     strategy: parallel
     min_size: 1       # all
     concurrency: 20
-    chunk_size: 10485760     # 10MB per chunk
+    chunk_size: 1048576     # 1MB per chunk
   - name: docker-registry
     pattern: "/v2/.*"
     upstream: "https://registry-1.docker.io"
     strategy: proxy
+    handler: handlers.docker  # 特殊处理模块路径
     
   - name: pip-packages
     pattern: "/packages/.+\\.(whl|tar\\.gz|zip)$"
@@ -52,6 +53,12 @@ rules:
     path_rewrite:
       - search: "/blob/"
         replace: "/resolve/"
+    # HEAD 请求时需要额外保留的响应头（用于元数据获取）
+    head_meta_headers:
+      - "x-repo-commit"
+      - "x-linked-etag"
+      - "x-linked-size"
+      - "etag"
 
   - name: huggingface-api
     pattern: '/api/models/.*'
