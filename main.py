@@ -91,6 +91,16 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
     headers = {k: v for k, v in request.headers.items() 
                if k.lower() not in ['host', 'connection', 'content-length']}
     
+    # 特殊处理：huggingface HEAD 请求需要保留元数据头部
+    hf_meta_headers = {}
+    if request.method == "HEAD" and "huggingface.co" in target_url:
+        # 先获取元数据（不跟随重定向）
+        hf_resp = await http_client.head(target_url, headers=headers, follow_redirects=False)
+        hf_meta_headers = {
+            k: v for k, v in hf_resp.headers.items()
+            if k.lower() in ['x-repo-commit', 'x-linked-etag', 'x-linked-size', 'etag']
+        }
+    
     async with http_client.stream(
         request.method, target_url, headers=headers,
         content=await request.body(),
@@ -106,6 +116,10 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         # 过滤掉可能导致问题的响应头
         response_headers = {k: v for k, v in resp.headers.items() 
                            if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']}
+        
+        # 合并 huggingface 元数据头部
+        response_headers.update(hf_meta_headers)
+        
         return Response(
             content=content,
             status_code=resp.status_code,
