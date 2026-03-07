@@ -27,7 +27,6 @@ rules:
     strategy: proxy
     header_rewrite:
       realm: "https://auth.docker.io/token"
-      service: "registry.docker.io"
 
   - name: docker-auth
     pattern: "/token.*"

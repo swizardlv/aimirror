@@ -133,11 +133,11 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
         )
 
 def _rewrite_www_authenticate(www_auth: str, header_rewrite: dict) -> str:
-    """改写 WWW-Authenticate 头中的 realm 和 service
+    """改写 WWW-Authenticate 头中的 realm URL
     
     Args:
         www_auth: 原始的 WWW-Authenticate 头值，如：Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
-        header_rewrite: 头改写配置 {"realm": "https://auth.docker.io/token", "service": "registry.docker.io"}
+        header_rewrite: 头改写配置 {"realm": "https://auth.docker.io/token"}
     
     Returns:
         改写后的 WWW-Authenticate 头值
@@ -146,16 +146,14 @@ def _rewrite_www_authenticate(www_auth: str, header_rewrite: dict) -> str:
         import re
         from urllib.parse import urlparse, urlunparse
         
-        new_www_auth = www_auth
-        
         # 从全局配置获取 public_host
         public_host = config['server'].get('public_host', f"127.0.0.1:{config['server']['port']}")
         
-        # 1. 改写 realm
+        # 改写 realm
         realm_target = header_rewrite.get('realm')
         
         if realm_target:
-            realm_match = re.search(r'realm="([^"]+)"', new_www_auth)
+            realm_match = re.search(r'realm="([^"]+)"', www_auth)
             if realm_match:
                 original_realm = realm_match.group(1)
                 
@@ -174,23 +172,11 @@ def _rewrite_www_authenticate(www_auth: str, header_rewrite: dict) -> str:
                     ))
                     
                     # 替换 realm URL
-                    new_www_auth = new_www_auth.replace(f'realm="{original_realm}"', f'realm="{new_realm}"')
+                    new_www_auth = www_auth.replace(f'realm="{original_realm}"', f'realm="{new_realm}"')
                     logging.info(f"Rewrote WWW-Authenticate realm: {original_realm} -> {new_realm}")
+                    return new_www_auth
         
-        # 2. 改写 service（如果配置了）
-        service_target = header_rewrite.get('service')
-        if service_target:
-            service_match = re.search(r'service="([^"]+)"', new_www_auth)
-            if service_match:
-                original_service = service_match.group(1)
-                
-                # 检查 service 是否匹配目标
-                if service_target == original_service:
-                    # 替换 service 为 public_host
-                    new_www_auth = new_www_auth.replace(f'service="{original_service}"', f'service="{public_host}"')
-                    logging.info(f"Rewrote WWW-Authenticate service: {original_service} -> {public_host}")
-        
-        return new_www_auth
+        return www_auth
     except Exception as e:
         logging.warning(f"Failed to rewrite WWW-Authenticate header: {e}")
         return www_auth
