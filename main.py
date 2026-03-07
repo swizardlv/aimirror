@@ -370,14 +370,14 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             
             # 检查是否高负载（信号量被锁定表示并发已满）
             if download_semaphore.locked():
-                # 高负载：立即返回 202 + 10s 延时，快速处理连接队列
-                logging.info(f"High load, returning 202 with 10s retry: {cache_key}")
+                # 高负载：立即返回 302 + 10s 延时，快速处理连接队列
+                logging.info(f"High load, returning 302 with 10s retry: {cache_key}")
                 return Response(
-                    status_code=202,
-                    headers={
-                        "Retry-After": "10",
-                        "Cache-Control": "no-cache, no-store, must-revalidate"
-                    }
+                status_code=302,
+                headers={
+                    "Location": str(request.url),
+                    "Cache-Control": "no-cache, no-store, must-revalidate"
+                }
                 )
             
             # 非高负载：每0.5秒检测一次，下载完成立即返回，最多等待10秒
@@ -401,13 +401,13 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
                                     headers={"Content-Length": str(os.path.getsize(cached))}
                                 )
                             await asyncio.sleep(0.5)
-                        break  # 缓存还没好，返回202
+                        break  # 缓存还没好，返回302
                 
-                logging.info(f"Download not ready, returning 202: {cache_key}")
+                logging.info(f"Download not ready, returning 302: {cache_key}")
                 return Response(
-                    status_code=202,
+                    status_code=302,
                     headers={
-                        "Retry-After": "2",
+                        "Location": str(request.url),
                         "Cache-Control": "no-cache, no-store, must-revalidate"
                     }
                 )
