@@ -59,6 +59,7 @@ cache: CacheManager = None
 http_client: httpx.AsyncClient = None
 download_semaphore: asyncio.Semaphore = None  # 全局下载并发控制
 active_downloads: dict = {}  # 正在下载的文件 {cache_key: asyncio.Event}
+upstream_proxy: Optional[str] = None  # 上游代理配置
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -88,10 +89,11 @@ async def lifespan(app: FastAPI):
     logging.info(f"Global download concurrency limit: {max_concurrent_downloads}")
     
     # HTTP 客户端（带代理支持）
-    proxy = config['server'].get('upstream_proxy')
+    global upstream_proxy
+    upstream_proxy = config['server'].get('upstream_proxy')
     # 如果 proxy 为空字符串，设为 None
-    if not proxy:
-        proxy = None
+    if not upstream_proxy:
+        upstream_proxy = None
     
     # 配置连接池限制，避免 PoolTimeout
     limits = httpx.Limits(
@@ -103,11 +105,11 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, pool=5),  # pool=5秒连接池获取超时
         follow_redirects=True,
-        proxy=proxy,
+        proxy=upstream_proxy,
         limits=limits
     )
     
-    logging.info(f"fast_proxy started, upstream_proxy={proxy}")
+    logging.info(f"fast_proxy started, upstream_proxy={upstream_proxy}")
     yield
     
     # 清理
@@ -125,7 +127,7 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
     meta_headers = {}
     if request.method == "HEAD" and rule and rule.head_meta_headers:
         # 先获取元数据（不跟随重定向）
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=http_client._proxy) as head_client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=upstream_proxy) as head_client:
             meta_resp = await head_client.head(target_url, headers=headers, follow_redirects=False)
             meta_headers = {
                 k: v for k, v in meta_resp.headers.items()
@@ -261,7 +263,7 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
         headers['Authorization'] = auth_header
     
     # 使用独立的 HEAD 客户端，避免占用全局连接池
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=http_client._proxy) as head_client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=upstream_proxy) as head_client:
         head_resp = await head_client.head(target_url, headers=headers, follow_redirects=True)
         # 获取最终 URL（如果有重定向）
         final_url = str(head_resp.url)
