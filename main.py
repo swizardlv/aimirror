@@ -92,10 +92,19 @@ async def lifespan(app: FastAPI):
     # 如果 proxy 为空字符串，设为 None
     if not proxy:
         proxy = None
+    
+    # 配置连接池限制，避免 PoolTimeout
+    limits = httpx.Limits(
+        max_connections=200,           # 最大连接数
+        max_keepalive_connections=50,  # 最大保持连接数
+        keepalive_expiry=30.0          # 保持连接过期时间(秒)
+    )
+    
     http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0),
+        timeout=httpx.Timeout(300.0, pool=5),  # pool=5秒连接池获取超时
         follow_redirects=True,
-        proxy=proxy
+        proxy=proxy,
+        limits=limits
     )
     
     logging.info(f"fast_proxy started, upstream_proxy={proxy}")
@@ -116,11 +125,12 @@ async def _proxy_request(request: Request, target_url: str, rule: Rule = None) -
     meta_headers = {}
     if request.method == "HEAD" and rule and rule.head_meta_headers:
         # 先获取元数据（不跟随重定向）
-        meta_resp = await http_client.head(target_url, headers=headers, follow_redirects=False)
-        meta_headers = {
-            k: v for k, v in meta_resp.headers.items()
-            if k.lower() in [h.lower() for h in rule.head_meta_headers]
-        }
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=http_client._proxy) as head_client:
+            meta_resp = await head_client.head(target_url, headers=headers, follow_redirects=False)
+            meta_headers = {
+                k: v for k, v in meta_resp.headers.items()
+                if k.lower() in [h.lower() for h in rule.head_meta_headers]
+            }
 
     async with http_client.stream(
         request.method, target_url, headers=headers,
@@ -250,12 +260,14 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
     if auth_header:
         headers['Authorization'] = auth_header
     
-    head_resp = await http_client.head(target_url, headers=headers, follow_redirects=True)
-    # 获取最终 URL（如果有重定向）
-    final_url = str(head_resp.url)
+    # 使用独立的 HEAD 客户端，避免占用全局连接池
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), proxy=http_client._proxy) as head_client:
+        head_resp = await head_client.head(target_url, headers=headers, follow_redirects=True)
+        # 获取最终 URL（如果有重定向）
+        final_url = str(head_resp.url)
+        content_length = int(head_resp.headers.get('content-length', 0))
+        content_type = head_resp.headers.get('content-type', '')
     logging.info(f"Final URL after redirect: {final_url}")
-    content_length = int(head_resp.headers.get('content-length', 0))
-    content_type = head_resp.headers.get('content-type', '')
     logging.info(f"HEAD response: content_length={content_length}, content_type={content_type}")
     
     # 检查文件大小是否符合规则
