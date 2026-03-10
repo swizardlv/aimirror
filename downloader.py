@@ -42,7 +42,7 @@ class ParallelDownloader:
         """分割下载范围"""
         # 自动模式：当 chunk_size <= 0 时，自动计算 chunk_size = 总大小 / concurrency
         if self.chunk_size <= 0:
-            chunk_size = total_size // max((self.concurrency - 5), 1) # 避免除零错误,扣除5个线程，避免其他任务导致线程不够
+            chunk_size = total_size // max((self.concurrency - 10), 1) # 避免除零错误,扣除10个线程，避免其他任务导致线程不够
             if chunk_size <= 0:
                 chunk_size = total_size  # 防止除零或过小
         else:
