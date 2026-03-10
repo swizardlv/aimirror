@@ -194,6 +194,15 @@ sudo systemctl restart docker
 docker pull --registry-mirror=http://localhost:8081 nginx
 ```
 
+> **⚠️ 重要提示**：Docker 镜像层文件通常很大（GB 级别），建议将 `chunk_size` 设置为 `0`（自动模式）。
+> 
+> 自动模式下，`chunk_size = 文件总大小 / concurrency`，这样可以：
+> - 避免固定小分片导致分片数量过多
+> - 减少 Docker Registry token 因超时失效的概率
+> - 保持并发数不变，同时优化分片大小
+>
+> 配置示例见 `config.yaml` 中的 `docker-blob` 规则。
+
 ### HuggingFace (huggingface-cli)
 
 ```bash
@@ -383,7 +392,7 @@ rules:
     strategy: parallel
     min_size: 1       # all
     concurrency: 20
-    chunk_size: 1048576     # 1MB per chunk
+    chunk_size: 0     # 自动模式：总大小/concurrency，避免超大文件分片过多导致 token 超时
   - name: docker-registry
     pattern: "/v2/.*"
     upstream: "https://registry-1.docker.io"
@@ -485,7 +494,7 @@ logging:
 | `rules[].strategy` | 下载策略：`proxy` 直接代理 / `parallel` 并行下载 | `"parallel"` |
 | `rules[].min_size` | 最小文件大小（字节），小于此值使用代理 | `1048576` |
 | `rules[].concurrency` | 并行下载线程数 | `20` |
-| `rules[].chunk_size` | 每个分片大小（字节） | `10485760` |
+| `rules[].chunk_size` | 每个分片大小（字节），**≤0 表示自动计算**（总大小/concurrency） | `10485760` |
 | `rules[].cache_key_source` | 缓存 key 来源：`original` 使用原始URL，`final` 使用最终URL | `"original"` |
 | `rules[].path_rewrite` | 路径重写规则数组 | `[{search: "/blob/", replace: "/resolve/"}]` |
 | `rules[].content_rewrite` | 响应内容改写配置（用于 HTML/JSON 中的链接替换） | 见 default 规则 |

@@ -40,9 +40,17 @@ class ParallelDownloader:
     
     def _split_chunks(self, total_size: int) -> List[Chunk]:
         """分割下载范围"""
+        # 自动模式：当 chunk_size <= 0 时，自动计算 chunk_size = 总大小 / concurrency
+        if self.chunk_size <= 0:
+            chunk_size = total_size // self.concurrency
+            if chunk_size <= 0:
+                chunk_size = total_size  # 防止除零或过小
+        else:
+            chunk_size = self.chunk_size
+        
         chunks = []
-        for start in range(0, total_size, self.chunk_size):
-            end = min(start + self.chunk_size - 1, total_size - 1)
+        for start in range(0, total_size, chunk_size):
+            end = min(start + chunk_size - 1, total_size - 1)
             chunks.append(Chunk(start=start, end=end))
         return chunks
     
@@ -103,7 +111,8 @@ class ParallelDownloader:
             
             # 3. 分割任务
             self.chunks = self._split_chunks(self.total_size)
-            logging.info(f"Split into {len(self.chunks)} chunks")
+            actual_chunk_size = self.chunks[0].end - self.chunks[0].start + 1 if self.chunks else 0
+            logging.info(f"Split into {len(self.chunks)} chunks, actual chunk size: {actual_chunk_size / 1024 / 1024:.1f}MB")
             
             # 4. 并发下载
             sem = asyncio.Semaphore(self.concurrency)
@@ -155,7 +164,8 @@ class ParallelDownloader:
                 
                 # 3. 分割任务
                 self.chunks = self._split_chunks(self.total_size)
-                logging.info(f"Split into {len(self.chunks)} chunks")
+                actual_chunk_size = self.chunks[0].end - self.chunks[0].start + 1 if self.chunks else 0
+                logging.info(f"Split into {len(self.chunks)} chunks, actual chunk size: {actual_chunk_size / 1024 / 1024:.1f}MB")
                 
                 # 4. 并发下载并实时写入
                 sem = asyncio.Semaphore(self.concurrency)
