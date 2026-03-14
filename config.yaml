@@ -33,6 +33,12 @@ rules:
     strategy: proxy
 
   # PyPI 包文件 /packages/
+  # .metadata 文件使用代理策略（HEAD 和 GET 返回大小不一致）
+  - name: pypi-metadata
+    pattern: '/packages/.+\.metadata$'
+    upstream: "https://files.pythonhosted.org"
+    strategy: proxy
+
   - name: pypi-packages
     path_prefix: "/packages"
     upstream: "https://files.pythonhosted.org"
