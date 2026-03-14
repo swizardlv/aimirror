@@ -238,7 +238,7 @@ def test_end_to_end():
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid
     )
-
+    
     # 等待服务启动（重试机制）
     print("  等待服务启动...")
     max_retries = 10

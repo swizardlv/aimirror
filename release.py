@@ -93,7 +93,7 @@ def build_package():
     run_command("rm -rf dist/ build/ *.egg-info/")
     
     # 构建包
-    result = run_command("python3 -m build --no-isolation", check=False)
+    result = run_command("/usr/bin/python3 -m build --no-isolation", check=False)
     if result.returncode != 0:
         print("构建失败，尝试安装依赖后重试...")
         run_command("pip install 'setuptools>=61.0' wheel -i https://pypi.org/simple -q")
