@@ -58,6 +58,7 @@ router: Router = None
 cache: CacheManager = None
 http_client: httpx.AsyncClient = None
 download_semaphore: asyncio.Semaphore = None  # 全局下载并发控制
+sequential_download_semaphore: asyncio.Semaphore = None  # chunk_size=0 时的串行下载控制（只允许一个任务）
 active_downloads: dict = {}  # 正在下载的文件 {cache_key: asyncio.Event}
 upstream_proxy: Optional[str] = None  # 上游代理配置
 
@@ -87,6 +88,10 @@ async def lifespan(app: FastAPI):
     max_concurrent_downloads = config.get('server', {}).get('max_concurrent_downloads', 10)
     download_semaphore = asyncio.Semaphore(max_concurrent_downloads)
     logging.info(f"Global download concurrency limit: {max_concurrent_downloads}")
+    
+    # 初始化 chunk_size=0 时的串行下载信号量（只允许一个任务并行）
+    sequential_download_semaphore = asyncio.Semaphore(1)
+    logging.info("Sequential download mode (chunk_size=0) limit: 1")
     
     # HTTP 客户端（带代理支持）
     global upstream_proxy
@@ -366,8 +371,11 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             }
         )
     
-    # 5. 使用全局信号量控制并发，并开始下载
-    async with download_semaphore:
+    # 5. 使用信号量控制并发，并开始下载
+    # 当 chunk_size=0 时，使用 sequential_download_semaphore 限制只能有一个任务
+    # 其他情况使用全局 download_semaphore
+    semaphore = sequential_download_semaphore if rule.chunk_size == 0 else download_semaphore
+    async with semaphore:
         # 再次检查缓存（可能其他线程已完成）
         cached = cache.get(cache_key, content_type)
         if cached:
@@ -403,7 +411,9 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
             active_downloads[cache_key] = (temp_file, download_task, start_time)
             
             # 检查是否高负载（信号量被锁定表示并发已满）
-            if download_semaphore.locked():
+            # 根据 chunk_size 选择正确的信号量进行判断
+            current_semaphore = sequential_download_semaphore if rule.chunk_size == 0 else download_semaphore
+            if current_semaphore.locked():
                 # 高负载：立即返回 302 + 10s 延时，快速处理连接队列
                 logging.info(f"High load, returning 302 with 10s retry: {cache_key}")
                 return Response(

@@ -88,7 +88,7 @@ rules:
     strategy: parallel
     min_size: 1
     concurrency: 20
-    chunk_size: 1048576      # 1MB per chunk
+    chunk_size: 0      # 1MB per chunk
 
   - name: docker-registry
     pattern: "/v2/.*"
