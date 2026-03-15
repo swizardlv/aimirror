@@ -16,9 +16,9 @@ class Chunk:
     downloaded: bool = False
 
 class ParallelDownloader:
-    def __init__(self, url: str, filepath: str, concurrency: int = 4, 
+    def __init__(self, url: str, filepath: str, concurrency: int = 4,
                  chunk_size: int = 5*1024*1024, proxy: Optional[str] = None,
-                 headers: Optional[dict] = None, stream_mode: bool = False,
+                 headers: Optional[dict] = None,
                  cache_manager = None, chunk_ttl_hours: int = 48):
         self.url = url
         self.filepath = filepath
@@ -26,7 +26,6 @@ class ParallelDownloader:
         self.chunk_size = chunk_size
         self.proxy = proxy
         self.headers = headers or {}
-        self.stream_mode = stream_mode  # 流式模式：边下载边写入文件
         self.total_size = 0
         self.chunks: List[Chunk] = []
         self.cache_manager = cache_manager  # 缓存管理器，用于断点续传

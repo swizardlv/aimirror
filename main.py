@@ -399,7 +399,6 @@ async def _parallel_download(request: Request, target_url: str, rule) -> Respons
                 chunk_size=rule.chunk_size,
                 proxy=config['server'].get('upstream_proxy'),
                 headers=headers if auth_header else None,
-                stream_mode=True,  # 启用流式模式
                 cache_manager=cache,  # 启用断点续传缓存
                 chunk_ttl_hours=chunk_ttl
             )
