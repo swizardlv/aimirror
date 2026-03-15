@@ -179,19 +179,30 @@ class CacheManager:
             })
         return chunks
     
-    def mark_chunk_downloaded(self, url: str, total_size: int, chunk_start: int, chunk_end: int):
-        """标记分块已下载完成"""
+    def mark_chunks_downloaded(self, url: str, total_size: int, chunks: List[tuple]):
+        """批量标记分块已下载完成
+        
+        Args:
+            chunks: 分块列表，每个元素为 (chunk_start, chunk_end) 元组
+        """
+        if not chunks:
+            return
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        c.execute('''
+        # 使用事务批量写入
+        c.executemany('''
             INSERT INTO chunks (url, total_size, chunk_start, chunk_end, downloaded, updated_at)
             VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
             ON CONFLICT(url, chunk_start, chunk_end) DO UPDATE SET
                 downloaded = 1,
                 updated_at = CURRENT_TIMESTAMP
-        ''', (url, total_size, chunk_start, chunk_end))
+        ''', [(url, total_size, start, end) for start, end in chunks])
         conn.commit()
         conn.close()
+    
+    def mark_chunk_downloaded(self, url: str, total_size: int, chunk_start: int, chunk_end: int):
+        """标记单个分块已下载完成（兼容旧接口）"""
+        self.mark_chunks_downloaded(url, total_size, [(chunk_start, chunk_end)])
     
     def mark_chunk_pending(self, url: str, total_size: int, chunk_start: int, chunk_end: int):
         """标记分块为待下载状态（用于恢复下载时）"""

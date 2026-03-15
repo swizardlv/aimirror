@@ -82,11 +82,11 @@ class ParallelDownloader:
                     cached_chunks = self.cache_manager.get_downloaded_chunks(
                         self.url, self.total_size, self.chunk_ttl_hours
                     )
-                    for cached in cached_chunks:
-                        for chunk in self.chunks:
-                            if chunk.start == cached['start'] and chunk.end == cached['end']:
-                                chunk.downloaded = True
-                                break
+                    # 使用字典优化查找性能 O(N) 而不是 O(N²)
+                    cached_set = {(c['start'], c['end']) for c in cached_chunks}
+                    for chunk in self.chunks:
+                        if (chunk.start, chunk.end) in cached_set:
+                            chunk.downloaded = True
                     
                     skipped = sum(1 for c in self.chunks if c.downloaded)
                     if skipped > 0:
@@ -111,22 +111,14 @@ class ParallelDownloader:
                                         async with aiofiles.open(temp_file, 'r+b') as f:
                                             await f.seek(chunk.start)
                                             await f.write(data)
-                                        # 标记为已下载
+                                        # 标记为已下载（仅在内存中标记，最后统一写数据库）
                                         chunk.downloaded = True
-                                        if self.cache_manager:
-                                            self.cache_manager.mark_chunk_downloaded(
-                                                self.url, self.total_size, chunk.start, chunk.end
-                                            )
                                         return
                                     elif resp.status == 200 and chunk.start == 0:
                                         data = await resp.read()
                                         async with aiofiles.open(temp_file, 'r+b') as f:
                                             await f.write(data)
                                         chunk.downloaded = True
-                                        if self.cache_manager:
-                                            self.cache_manager.mark_chunk_downloaded(
-                                                self.url, self.total_size, chunk.start, chunk.end
-                                            )
                                         return
                                     else:
                                         raise RuntimeError(f"Chunk download failed: {resp.status}")
@@ -158,6 +150,12 @@ class ParallelDownloader:
                     # 检查是否有失败的 chunk
                     if failed_chunks:
                         raise RuntimeError(f"Download failed: {len(failed_chunks)}/{len(pending_chunks)} chunks failed")
+                    
+                    # 下载完成后，批量写入分块缓存（一次数据库操作）
+                    if self.cache_manager:
+                        downloaded_chunks = [(c.start, c.end) for c in self.chunks if c.downloaded]
+                        if downloaded_chunks:
+                            self.cache_manager.mark_chunks_downloaded(self.url, self.total_size, downloaded_chunks)
                 else:
                     logging.info("All chunks already downloaded, skipping download")
                 
