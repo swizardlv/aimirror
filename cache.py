@@ -6,8 +6,6 @@ import os
 import hashlib
 import sqlite3
 import shutil
-import asyncio
-import json
 from pathlib import Path
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
